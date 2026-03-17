@@ -221,6 +221,7 @@ function calculate(input: InputState) {
   const spans = Math.max(postLines - 1, 1);
   const clearWidth = Math.max(input.width - postLines * POST_W, 0);
   const clearSpan = clearWidth / spans;
+  const lowerShelfCount = Math.max(input.shelves - 1, 0);
 
   const topBoardWidth = input.width;
   const topBoardDepth = input.depth;
@@ -230,7 +231,7 @@ function calculate(input: InputState) {
   const verticalPosts = postLines * 2;
   const topSideRails = 2;
   const supportPerLevel = input.middlePosts * 2 + 2;
-  const supportLevels = input.shelves + 1;
+  const supportLevels = lowerShelfCount + 1;
   const totalSupports = supportPerLevel * supportLevels;
 
   const woodPieces: LinearPiece[] = [
@@ -245,7 +246,7 @@ function calculate(input: InputState) {
 
   const boardPieces: BoardPiece[] = [
     { label: "一番上の棚", width: topBoardWidth, height: topBoardDepth },
-    ...Array.from({ length: input.shelves * spans }, (_, i) => ({
+    ...Array.from({ length: lowerShelfCount * spans }, (_, i) => ({
       label: `棚板${i + 1}`,
       width: middleBoardWidth,
       height: middleBoardDepth,
@@ -262,13 +263,13 @@ function calculate(input: InputState) {
 
   const shelfBottoms = buildShelfBottomHeights(
     input.height,
-    input.shelves,
+    lowerShelfCount,
     input.boardThickness,
     input.bottomHeight,
     input.autoShelfHeights,
     input.manualHeights
   );
-  const supportGuide = buildSupportGuide(input.height, shelfBottoms, input.boardThickness);
+  const supportGuide = buildSupportGuide(input.height, shelfBottoms);
   const boardWarnings = boardPack.unplaced.map(
     (piece) => `${piece.label} ${formatMm(piece.width)}×${formatMm(piece.height)}mm は、合板 ${formatMm(input.sheetWidth)}×${formatMm(input.sheetHeight)}mm に回転しても入りません。`
   );
@@ -282,6 +283,7 @@ function calculate(input: InputState) {
     topBoardDepth,
     middleBoardWidth,
     middleBoardDepth,
+    lowerShelfCount,
     woodCount,
     sheetCount,
     screwCount,
@@ -307,32 +309,38 @@ function buildShelfBottomHeights(
   manual: number[]
 ) {
   const first = Math.min(bottomHeightMm, heightMm - boardThicknessMm);
-  if (shelves <= 1) return [first];
+  if (shelves <= 0) return [];
+  if (shelves === 1) return [first];
 
   if (!auto) {
-    const values = manual.slice(0, shelves).map((v, i) => (i === 0 ? first : Math.max(first, Math.min(v, heightMm - boardThicknessMm))));
-    while (values.length < shelves) {
-      values.push(first);
-    }
-    return values.sort((a, b) => a - b);
+    const values = manual
+      .slice(0, shelves)
+      .map((v, i) => (i === 0 ? first : Math.max(first, Math.min(v, heightMm - boardThicknessMm))))
+      .sort((a, b) => a - b);
+    while (values.length < shelves) values.push(first);
+    return values.slice(0, shelves);
   }
 
-  const last = Math.max(first, heightMm - boardThicknessMm * 2);
-  return Array.from({ length: shelves }, (_, i) => first + ((last - first) * i) / (shelves - 1));
+  // 上端は天板下面（= 支柱高さ）を基準にし、そこから最下段までを均等割りする。
+  // ここで返すのは「下段棚板の下面高さ」だけなので、一番上の天板位置は含めない。
+  const supportTopHeights = Array.from({ length: shelves + 1 }, (_, i) => {
+    return first + ((heightMm - first) * i) / shelves;
+  });
+
+  return supportTopHeights.slice(0, shelves);
 }
 
-function buildSupportGuide(heightMm: number, shelfBottoms: number[], boardThicknessMm: number) {
-  const supportCenters = [
-    heightMm - POST_D / 2,
-    ...shelfBottoms.map((bottomMm) => bottomMm + boardThicknessMm - (boardThicknessMm / 2 + POST_D / 2)),
-  ];
+function buildSupportGuide(heightMm: number, shelfBottoms: number[]) {
+  const supportTopHeights = [heightMm, ...shelfBottoms];
 
-  return supportCenters.map((center, index) => ({
+  return supportTopHeights.map((topHeight, index) => ({
     label: index === 0 ? "一番上の棚受け" : `${index}段目の下の棚受け`,
-    fromTopCm: ((heightMm - center - POST_D / 2) / 10).toFixed(1),
-    fromBottomCm: ((center - POST_D / 2) / 10).toFixed(1),
+    fromTopCm: ((heightMm - topHeight) / 10).toFixed(1),
+    fromBottomCm: (topHeight / 10).toFixed(1),
   }));
 }
+
+
 
 function packLinearCuts(pieces: LinearPiece[], stockLength: number, kerf: number): LinearBin[] {
   const sorted = [...pieces].sort((a, b) => b.length - a.length);
@@ -479,10 +487,15 @@ function Shelf3D({ input, result }: { input: InputState; result: CalcResult }) {
   const zFront = outerDepth / 2 - postD / 2;
   const zBack = -outerDepth / 2 + postD / 2;
   const supports = buildSupportCenters(postXs, postW);
+
+  // 棚受けの天面 = 天板下面 or 各棚板下面
   const supportYs = [
     height - postD / 2,
-    ...result.shelfBottoms.map((bottomMm) => ((bottomMm + input.boardThickness) / 1000) - (boardT / 2 + postD / 2)),
+    ...result.shelfBottoms.map((bottomMm) => bottomMm / 1000 - postD / 2),
   ];
+
+  // 棚板の中心高さ
+  const topBoardY = height + boardT / 2;
   const shelfYs = result.shelfBottoms.map((bottomMm) => bottomMm / 1000 + boardT / 2);
 
   return (
@@ -505,15 +518,6 @@ function Shelf3D({ input, result }: { input: InputState; result: CalcResult }) {
         </group>
       ))}
 
-      <mesh position={[-width / 2 + postW / 2, height - postW / 2, 0]} castShadow receiveShadow>
-        <boxGeometry args={[postW, postW, innerDepth]} />
-        <meshStandardMaterial color="#af733d" />
-      </mesh>
-      <mesh position={[width / 2 - postW / 2, height - postW / 2, 0]} castShadow receiveShadow>
-        <boxGeometry args={[postW, postW, innerDepth]} />
-        <meshStandardMaterial color="#996432" />
-      </mesh>
-
       {supportYs.map((y, i) => (
         <group key={`support-${i}`}>
           {supports.map((s) => (
@@ -524,6 +528,11 @@ function Shelf3D({ input, result }: { input: InputState; result: CalcResult }) {
           ))}
         </group>
       ))}
+
+      <mesh position={[0, topBoardY, 0]} castShadow receiveShadow>
+        <boxGeometry args={[width, boardT, outerDepth]} />
+        <meshStandardMaterial color="#dec385" />
+      </mesh>
 
       {shelfYs.map((y, i) => (
         <group key={`shelf-${i}`}>
@@ -541,11 +550,6 @@ function Shelf3D({ input, result }: { input: InputState; result: CalcResult }) {
           })}
         </group>
       ))}
-
-      <mesh position={[0, height + boardT / 2, 0]} castShadow receiveShadow>
-        <boxGeometry args={[width, boardT, outerDepth]} />
-        <meshStandardMaterial color="#dec385" />
-      </mesh>
     </group>
   );
 }
